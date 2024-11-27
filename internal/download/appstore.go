@@ -37,6 +37,9 @@ const (
 	appStoreSearchURL   = "https://itunes.apple.com/search"
 	appStoreLookupURL   = "https://itunes.apple.com/lookup"
 
+	mzFinanceUserAgent = "Configurator/2.17 (Macintosh; OS X 2147483647) AppleWebKit/537.78.2"
+	mzBuyUserAgent     = "MacAppStore/1.3 (Macintosh; OS X 2147483647) AppleWebKit/537.78.2"
+
 	// AppStoreSearchLimit is the maximum number of results returned by the App Store search API
 	AppStoreSearchLimit = 200
 
@@ -399,7 +402,7 @@ func (as *AppStore) signIn(username, password, code string, attempt int, itspod 
 	}
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Add("User-Agent", userAgent)
+	req.Header.Set("User-Agent", mzFinanceUserAgent)
 
 	if itspod != 0 {
 		itspod := strconv.Itoa(itspod)
@@ -638,58 +641,56 @@ func (as *AppStore) Purchase(bundleID string) error {
 		return fmt.Errorf("paid apps cannot be purchased")
 	}
 
-	buf := new(bytes.Buffer)
-
 	mac, err := getMacAddress()
 	if err != nil {
 		return fmt.Errorf("failed to get mac address: %v", err)
 	}
 
-	guid := strings.ReplaceAll(strings.ToUpper(mac), ":", "")
-
-	plist.NewEncoderForFormat(buf, plist.XMLFormat).Encode(&purchaseRequest{
-		AppExtVrsID:               "0",
-		HasAskedToFulfillPreorder: "true",
-		BuyWithoutAuthorization:   "true",
-		HasDoneAgeCheck:           "true",
-		GuID:                      guid,
-		NeedDiv:                   "0",
-		OrigPage:                  fmt.Sprintf("Software-%d", app.ID),
-		OrigPageLocation:          "Buy",
-		Price:                     "0",
-		PricingParameters:         "STDQ",
-		ProductType:               "C",
-		SalableAdamID:             app.ID,
-	})
-
-	req, err := http.NewRequest("POST", appStorePurchaseURL, buf)
-	if err != nil {
-		return fmt.Errorf("failed to create http POST request: %v", err)
+	form := url.Values{
+		"productType":       []string{"C"},
+		"pricingParameters": []string{"STDQ"},
+		"appExtVrsId":       []string{"0"},
+		"pg":                []string{"default"},
+		"salableAdamId":     []string{strconv.Itoa(app.ID)},
+		"price":             []string{"0"},
+		"creditDisplay":     []string{""},
+		"guid":              []string{strings.ReplaceAll(strings.ToUpper(mac), ":", "")},
 	}
 
-	q := url.Values{}
-	q.Add("guid", guid)
-	req.URL.RawQuery = q.Encode()
+	req, err := http.NewRequest("POST", appStorePurchaseURL, strings.NewReader(form.Encode()))
+	for _, cookie := range as.Client.Jar.Cookies(&url.URL{Scheme: "https", Host: "buy.itunes.apple.com"}) {
+		if cookie.Name != "itspod" {
+			continue
+		}
 
-	req.Header.Add("User-Agent", userAgent)
-	req.Header.Set("Content-Type", "application/x-apple-plist")
-	req.Header.Set("iCloud-DSID", as.dsid)
+		itspod := cookie.Value
+
+		query := req.URL.Query()
+		query.Set("PRH", itspod)
+		query.Set("Pod", itspod)
+
+		req.URL.RawQuery = query.Encode()
+
+		break
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", mzBuyUserAgent)
 	req.Header.Set("X-Dsid", as.dsid)
-	req.Header.Set("X-Apple-Store-Front", as.config.StoreFront)
 	req.Header.Set("X-Token", as.token)
 
-	response, err := as.Client.Do(req)
+	res, err := as.Client.Do(req)
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer res.Body.Close()
 
-	body, err := io.ReadAll(response.Body)
+	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		return err
 	}
 
-	log.Debugf("POST Purchase: (%d):\n%s\n", response.StatusCode, string(body))
+	log.Debugf("POST Purchase: (%d):\n%s\n", res.StatusCode, string(body))
 
 	// os.WriteFile("purchase.xml", body, 0644)
 
@@ -716,7 +717,7 @@ func (as *AppStore) Purchase(bundleID string) error {
 		return as.Purchase(bundleID)
 	}
 
-	if response.StatusCode == 500 {
+	if res.StatusCode == 500 {
 		return fmt.Errorf("account already has a license for this app")
 	}
 
@@ -757,7 +758,7 @@ func (as *AppStore) Download(bundleID, output string) error {
 	}
 
 	req.Header.Set("Content-Type", "application/x-apple-plist")
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", mzFinanceUserAgent)
 	req.Header.Set("X-Dsid", as.dsid)
 
 	response, err := as.Client.Do(req)
